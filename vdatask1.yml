@@ -1,0 +1,82 @@
+---
+- name: Procedura di riavvio VDA per list 2
+  hosts: vdalist2 
+  gather_facts: true 
+  tasks:
+    - name: Check disconnected users in Task Manager
+      win_command: quser /DISCONNECT  # Execute the 'quser /DISCONNECT' command to retrieve disconnected users in Task Manager
+      register: disconnected_users  # Store the output of the command in the 'disconnected_users' variable
+      changed_when: false  # Set 'changed_when' to false to prevent the task from being considered "changed" even if output differs 
+
+    - name: Log off disconnected users
+      win_command: logoff {{ item.split(' ')[2] }}  # Execute 'logoff' command for each disconnected user
+      with_items: "{{ disconnected_users.stdout_lines }}"  # Iterate over the lines of the 'disconnected_users' output
+      when: disconnected_users.stdout_lines | length > 0  # Execute the task only when there are disconnected users 
+    # - name: Connect to CyberArk
+    #   cyberark_lookup:
+    #     platform_id: "platform_id"
+    #     safe: "safe_name"
+    #     object: "object_name"
+    #     field: "password"
+    #   register: cyberark_credentials #The register keyword is used to store the result of the cyberark_lookup task in the cyberark_credentials variable. This variable will contain the retrieved password, which can be used later for authentication.
+- name: Procedura di riavvio VDA per list 1 e 2
+  hosts: 
+   - vdalist1 
+   - vdalist2 
+  gather_facts: true 
+  tasks:
+    - name: Get current day and time
+      set_fact:
+        current_day: "{{ ansible_date_time.weekday }}"  # Retrieve the current day of the week
+        current_time: "{{ ansible_date_time.hour }}{{ ansible_date_time.minute | string }}"  # Retrieve the current time (HHMM)
+
+    - name: Check if it's time to reboot
+      set_fact:
+        reboot_required: false  # Initialize reboot_required variable to false
+      when: >
+        (current_day != 0 and current_time == '2100') or  # If it's not Sunday and the time is 21:00
+        (current_day == 0 and current_time == '0900')  # If it's Sunday and the time is 09:00
+
+    - name: Reboot the server
+      win_reboot:
+        reboot_timeout: 600  # Timeout value in seconds for the server to come back online
+      become: true  # Run the task with administrative privileges
+      register: reboot_task  # Store the result of the task in this variable
+      when: reboot_required  # Execute the task only when reboot is required
+      vars:
+        ansible_password: "{{ cyberark_credentials.content }}"  # Use the retrieved CyberArk password for authentication
+
+    - name: Wait for the server to come back online
+      win_ping:
+      become: false  # Run the task without administrative privileges
+      when: reboot_required and reboot_task is changed  # Execute the task only when a reboot occurred and the server is changed
+
+    - name: Create ServiceNow ticket (TASK)
+      uri:
+        url: https://your-instance.service-now.com/api/now/table/incident  # Specify the URL of your ServiceNow instance
+        method: POST
+        headers:
+          Content-Type: application/json
+          Authorization: "Basic your_auth_token"  # Specify the authentication token for ServiceNow
+        body_format: json
+        body:
+          priority: "LOW"  # Set the priority of the ticket to "LOW"
+          short_description: "SCR_CITRIX eseguito TASK {{ lookup('pipe', 'date +%Y%m%d%H%M%S') }}"  # Generate a timestamp to include in the short description
+          category: "TASK"  # Set the category of the ticket to "TASK"
+          cmdb_ci: "ASSEGNI"  # Set the configuration item to "ASSEGNI"
+          u_incident_area: "SISTEMI.WINDOWS.PROCEDURA"  # Set the incident area to "SISTEMI.WINDOWS.PROCEDURA"
+          u_scr_info: "PROATTIVA"  # Set the SCR info to "PROATTIVA"
+          assignment_group: "UW_SO_WINTEL"  # Set the assignment group to "UW_SO_WINTEL"
+          escalation: "Entity: SOC, Group: UW_SO_WINTEL"  # Set the escalation information
+      register: servicenow_response
+      when: reboot_required and reboot_task is changed and reboot_task.failed # Only run when there is a problem (reboot_task.failed)
+
+
+    # - name: Contact On Call
+    #   # Task to contact the On Call team
+    #   # Replace with your specific contact method or integration
+    #   when: reboot_required and reboot_task is changed and servicenow_response.status == 201
+
+
+
+
